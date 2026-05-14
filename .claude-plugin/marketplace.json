@@ -15,6 +15,25 @@
         "name": "Jesse Vincent",
         "email": "jesse@fsck.com"
       }
+    },
+    {
+      "name": "antigravity-awesome-skills",
+      "description": "Plugin-safe Claude Code distribution of Antigravity Awesome Skills with 1,442+ agentic skills.",
+      "version": "11.2.0",
+      "source": "https://github.com/sickn33/antigravity-awesome-skills",
+      "author": {
+        "name": "sickn33 and contributors",
+        "url": "https://github.com/sickn33/antigravity-awesome-skills"
+      },
+      "homepage": "https://github.com/sickn33/antigravity-awesome-skills",
+      "repository": "https://github.com/sickn33/antigravity-awesome-skills",
+      "license": "MIT",
+      "keywords": [
+        "skills",
+        "agentic-skills",
+        "plugin-safe",
+        "productivity"
+      ]
     }
   ]
 }
