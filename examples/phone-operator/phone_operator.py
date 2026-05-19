@@ -2,18 +2,22 @@
 """Virtual phone operator (IVR).
 
 A zero-dependency, text-based interactive voice response simulation. It greets
-callers, then lets them schedule an appointment or leave a message. Both are
-persisted to JSON files so a human can review them later.
+callers, identifies them against a CRM call sheet, then lets them schedule an
+appointment or leave a message. Both are persisted to JSON files so a human can
+review them later.
 
 Run interactively:
 
-    python3 operator.py
+    python3 phone_operator.py
 
-Records are written to the ``data/`` directory next to this script.
+Records are written to the ``data/`` directory next to this script. Caller
+identification reads ``crm.csv`` (the CCM/RPM prospect call sheet) next to this
+script.
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import re
 import sys
@@ -21,9 +25,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
+HERE = Path(__file__).resolve().parent
+DATA_DIR = HERE / "data"
 APPOINTMENTS_FILE = DATA_DIR / "appointments.json"
 MESSAGES_FILE = DATA_DIR / "messages.json"
+CRM_FILE = HERE / "crm.csv"
 
 BUSINESS_NAME = "Northside Family Clinic"
 HOURS = "Monday to Friday, 9am to 5pm"
@@ -52,6 +58,37 @@ class Caller:
         return input(prompt).strip()
 
 
+def normalize_phone(raw: str) -> str | None:
+    """Return digits of a plausible phone number, or None if it is not one."""
+    digits = re.sub(r"\D", "", raw)
+    if 7 <= len(digits) <= 15:
+        return digits
+    return None
+
+
+def load_crm(path: Path = CRM_FILE) -> dict[str, dict]:
+    """Index the CRM call sheet by normalized phone number.
+
+    The CSV is the CCM/RPM prospect sheet exported from the workbook; only the
+    fields the operator needs to recognize a caller are kept.
+    """
+    index: dict[str, dict] = {}
+    if not path.exists():
+        return index
+    with path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            phone = normalize_phone(row.get("Phone", ""))
+            if not phone:
+                continue
+            index[phone] = {
+                "name": row.get("Practice / Provider", "").strip(),
+                "city": row.get("City", "").strip(),
+                "specialty": row.get("Specialty", "").strip(),
+                "npi": row.get("NPI", "").strip(),
+            }
+    return index
+
+
 def load_records(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -66,14 +103,6 @@ def save_record(path: Path, record: dict) -> None:
     records = load_records(path)
     records.append(record)
     path.write_text(json.dumps(records, indent=2))
-
-
-def normalize_phone(raw: str) -> str | None:
-    """Return digits of a plausible phone number, or None if it is not one."""
-    digits = re.sub(r"\D", "", raw)
-    if 7 <= len(digits) <= 15:
-        return digits
-    return None
 
 
 def prompt_required(caller: Caller, question: str) -> str:
@@ -94,18 +123,41 @@ def prompt_phone(caller: Caller, question: str) -> str:
         caller.say("That doesn't look like a valid phone number. Please try again.")
 
 
-def schedule_appointment(caller: Caller) -> None:
+def identify_caller(caller: Caller, crm: dict[str, dict]) -> dict:
+    """Collect the callback number and match it against the CRM call sheet.
+
+    Returns ``{"phone", "name", "crm_match"}``. On a CRM hit the caller is
+    greeted by practice name and that name is reused; otherwise the caller is
+    asked for their name as a new contact.
+    """
+    phone = prompt_phone(caller, "Your callback number: ")
+    match = crm.get(phone)
+    if match:
+        where = f" in {match['city']}" if match["city"] else ""
+        caller.say(f"Thanks — I see you're calling from {match['name']}{where}.")
+        return {"phone": phone, "name": match["name"], "crm_match": match}
+    return {
+        "phone": phone,
+        "name": prompt_required(caller, "Your full name: "),
+        "crm_match": None,
+    }
+
+
+def schedule_appointment(caller: Caller, crm: dict[str, dict]) -> None:
     caller.say("\nLet's get you on the schedule.")
+    ident = identify_caller(caller, crm)
     record = {
         "type": "appointment",
-        "name": prompt_required(caller, "Your full name: "),
-        "phone": prompt_phone(caller, "A callback number: "),
+        "name": ident["name"],
+        "phone": ident["phone"],
         "preferred_time": prompt_required(
             caller, f"Preferred day and time ({HOURS}): "
         ),
         "reason": prompt_required(caller, "Briefly, the reason for your visit: "),
         "received_at": datetime.now().isoformat(timespec="seconds"),
     }
+    if ident["crm_match"]:
+        record["crm_npi"] = ident["crm_match"]["npi"]
     save_record(APPOINTMENTS_FILE, record)
     caller.say(
         f"\nThank you, {record['name']}. Your appointment request for "
@@ -114,15 +166,18 @@ def schedule_appointment(caller: Caller) -> None:
     )
 
 
-def take_message(caller: Caller) -> None:
+def take_message(caller: Caller, crm: dict[str, dict]) -> None:
     caller.say("\nI'll take a message for our staff.")
+    ident = identify_caller(caller, crm)
     record = {
         "type": "message",
-        "name": prompt_required(caller, "Your full name: "),
-        "phone": prompt_phone(caller, "A callback number: "),
+        "name": ident["name"],
+        "phone": ident["phone"],
         "message": prompt_required(caller, "Your message: "),
         "received_at": datetime.now().isoformat(timespec="seconds"),
     }
+    if ident["crm_match"]:
+        record["crm_npi"] = ident["crm_match"]["npi"]
     save_record(MESSAGES_FILE, record)
     caller.say(
         f"\nGot it, {record['name']}. Your message has been recorded and "
@@ -139,16 +194,18 @@ MENU = (
 )
 
 
-def run(caller: Caller) -> None:
+def run(caller: Caller, crm: dict[str, dict] | None = None) -> None:
+    if crm is None:
+        crm = load_crm()
     caller.say(f"Thank you for calling {BUSINESS_NAME}. Our hours are {HOURS}.")
     caller.say(MENU)
     while True:
         choice = caller.ask("Enter 1, 2, 3, or 0: ")
         if choice == "1":
-            schedule_appointment(caller)
+            schedule_appointment(caller, crm)
             caller.say(MENU)
         elif choice == "2":
-            take_message(caller)
+            take_message(caller, crm)
             caller.say(MENU)
         elif choice == "3":
             caller.say(MENU)
